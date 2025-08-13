@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/ComfyUI
+ARGS="${*:-${COMFY_ARGS:-"--listen 0.0.0.0 --port ${COMFY_PORT:-8188}"}}"
+echo "[start-comfyui] /venv/bin/python main.py ${ARGS}"
+exec /venv/bin/python main.py ${ARGS}
