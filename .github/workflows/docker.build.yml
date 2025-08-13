@@ -43,7 +43,7 @@ jobs:
         run: |
           SHA="${GITHUB_SHA::7}"
           EXTRA="${{ github.event.inputs.tag }}"
-          # On évite latest pour ne rien écraser :
+          # Tags sûrs : un tag stable RunPod + un tag immuable par commit
           TAGS="${IMAGE_REPO}:runpod-amd64-v1,${IMAGE_REPO}:${SHA}"
           if [ -n "$EXTRA" ]; then TAGS="${TAGS},${IMAGE_REPO}:${EXTRA}"; fi
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
