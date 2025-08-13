@@ -11,12 +11,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag additionnel (ex: v4.1.3)'
+        description: 'Tag additionnel (ex: v1.0.0)'
         required: false
         default: ''
 
 env:
-  IMAGE_REPO: docker.io/mauricebourdondock/comfyui-wan-v4.1.3-cu128
+  IMAGE_REPO: docker.io/mauricebourdondock/runpod-comfyui-c128-wan22-v1
 
 jobs:
   build:
@@ -38,12 +38,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute tags
+      - name: Compute tags (no latest)
         id: meta
         run: |
           SHA="${GITHUB_SHA::7}"
           EXTRA="${{ github.event.inputs.tag }}"
-          TAGS="${IMAGE_REPO}:latest,${IMAGE_REPO}:runpod-amd64,${IMAGE_REPO}:${SHA}"
+          # On évite latest pour ne rien écraser :
+          TAGS="${IMAGE_REPO}:runpod-amd64-v1,${IMAGE_REPO}:${SHA}"
           if [ -n "$EXTRA" ]; then TAGS="${TAGS},${IMAGE_REPO}:${EXTRA}"; fi
           echo "tags=${TAGS}" >> $GITHUB_OUTPUT
 
