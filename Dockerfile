@@ -1,4 +1,4 @@
-# Runpod ComfyUI Wan2.2 + Jupyter — V4.1.4c (SLIM: Torch at runtime)
+# Runpod ComfyUI Wan2.2 + Jupyter — V4.1.4c (ULTRA-SLIM: Torch + HF stack at runtime)
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive         PYTHONUNBUFFERED=1         PIP_NO_CACHE_DIR=1         TZ=UTC
@@ -21,24 +21,6 @@ RUN set -eux;       echo "Fetching ComfyUI from: ${COMFY_REPO} @ ${COMFY_REF}"; 
 
 # ComfyUI-Manager preinstall
 RUN git clone --depth=1 https://github.com/Comfy-Org/ComfyUI-Manager /opt/ComfyUI/custom_nodes/ComfyUI-Manager      && if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt ]; then           /venv/bin/pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt;         fi
-
-# -------- Python deps (no torch here; torch is installed at runtime) --------
-RUN /venv/bin/pip install --no-cache-dir -U pip setuptools wheel
-
-# Protobuf compatible first
-RUN /venv/bin/pip install --no-cache-dir "protobuf<5,>=3.20.3"
-
-# HF core / util
-RUN /venv/bin/pip install --no-cache-dir         huggingface-hub==0.24.6 safetensors==0.4.5 ftfy==6.3.1 pyloudnorm==0.1.1
-
-# Diffusers / Accelerate / Transformers
-RUN /venv/bin/pip install --no-cache-dir         diffusers==0.34.0 accelerate==1.10.0 transformers==4.44.2
-
-# timm / peft / einops
-RUN /venv/bin/pip install --no-cache-dir         timm==1.0.9 peft==0.17.0 einops==0.8.0
-
-# sentencepiece + vidéo / IO / réseau
-RUN /venv/bin/pip install --no-cache-dir         sentencepiece==0.2.0 opencv-python==4.10.0.84 imageio-ffmpeg==0.4.9 aiohttp==3.9.5 gguf==0.17.1
 
 # Dirs + copy scripts/manifests
 RUN mkdir -p /workspace /manifests /scripts /opt/ComfyUI/user/default/workflows /usr/local/bin /workspace/models

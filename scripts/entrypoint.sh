@@ -31,20 +31,27 @@ if [[ "${ENABLE_JUPYTER:-true}" == "true" ]]; then
     > "${JUPYTER_DIR:-/workspace}"/jupyter.log 2>&1 &
 fi
 
-# --- Torch auto-install at runtime if missing ---
+# --- Torch + HF stack install at runtime if missing ---
 if ! /venv/bin/python -c "import torch" >/dev/null 2>&1; then
-  log "[torch] not found → installing at runtime..."
-  # Try CUDA wheels first from TORCH_INDEX_URL; else fallback to CPU wheels
+  log "[torch] not found → installing CUDA wheels (or CPU fallback) ..."
   if ! /venv/bin/pip install --no-cache-dir \
         --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}" \
         "${TORCH_SPEC_TORCH:-torch}" "${TORCH_SPEC_VISION:-torchvision}" "${TORCH_SPEC_AUDIO:-torchaudio}"; then
-    log "[torch] CUDA wheels unavailable → falling back to CPU wheels"
+    log "[torch] CUDA wheels unavailable → CPU fallback"
     /venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
       torch torchvision torchaudio
   fi
-else
-  log "[torch] already installed."
 fi
+
+# Ensure protobuf<5 for HF
+/venv/bin/pip show protobuf >/dev/null 2>&1 || /venv/bin/pip install --no-cache-dir "protobuf<5,>=3.20.3"
+
+# Install HF stack if missing (post-Torch)
+/venv/bin/pip install --no-cache-dir \
+  huggingface-hub==0.24.6 safetensors==0.4.5 ftfy==6.3.1 pyloudnorm==0.1.1 \
+  diffusers==0.34.0 accelerate==1.10.0 transformers==4.44.2 \
+  timm==1.0.9 peft==0.17.0 einops==0.8.0 \
+  sentencepiece==0.2.0 opencv-python==4.10.0.84 imageio-ffmpeg==0.4.9 aiohttp==3.9.5 gguf==0.17.1 || true
 
 # Install custom nodes from manifest
 if [[ -f "${CUSTOM_NODES_MANIFEST:-}" ]]; then
