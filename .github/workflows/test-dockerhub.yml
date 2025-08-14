@@ -1,0 +1,18 @@
+name: Test DockerHub Login
+
+on:
+  workflow_dispatch: # déclenche manuellement depuis GitHub
+
+jobs:
+  dockerhub-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Log in to DockerHub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Confirm login
+        run: docker info
