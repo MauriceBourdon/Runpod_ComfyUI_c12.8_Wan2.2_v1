@@ -1,6 +1,103 @@
-# --- PATCHED Dockerfile ---
-ARG COMFY_REPO=https://github.com/comfyanonymous/ComfyUI.git
-ARG COMFY_REF=main
+# Runpod ComfyUI Wan2.2 + Jupyter — V4.1.4c (AUTO-REF + entrypoint)
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
-# Clone ComfyUI robustement (retry + fallback tarball)
-RUN set -eux;     for i in 1 2 3; do         git clone --depth=1 --branch ${COMFY_REF} ${COMFY_REPO} /opt/ComfyUI && break || sleep 5;     done;     if [ ! -d /opt/ComfyUI ]; then         echo "⚠️ git clone failed, fallback tarball...";         wget -O /tmp/comfyui.tar.gz ${COMFY_REPO}/archive/${COMFY_REF}.tar.gz;         mkdir -p /opt/ComfyUI;         tar -xzf /tmp/comfyui.tar.gz -C /opt/ComfyUI --strip-components=1;         rm /tmp/comfyui.tar.gz;     fi
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TZ=UTC
+
+# Base tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv python3-pip git git-lfs curl ca-certificates ffmpeg \
+    tini aria2 jq rsync net-tools iproute2 wget unzip && \
+    git lfs install && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python venv
+RUN python3 -m venv /venv && /venv/bin/pip install --upgrade pip wheel setuptools
+
+# JupyterLab minimal
+RUN /venv/bin/pip install jupyterlab==4.2.5 jupyterlab-lsp==5.1.0 jupyter-lsp==2.2.5
+
+# --- ComfyUI (auto-detect default branch + robust fetch) ---
+ARG COMFY_REPO=https://github.com/comfyanonymous/ComfyUI.git
+ARG COMFY_REF=auto   # values: auto | branch | tag | 40-char SHA
+ENV COMFY_REPO=${COMFY_REPO} COMFY_REF=${COMFY_REF}
+
+RUN set -eux; \
+  echo "Fetching ComfyUI from: ${COMFY_REPO} @ ${COMFY_REF}"; \
+  if [ "${COMFY_REF}" = "auto" ] || [ -z "${COMFY_REF}" ]; then \
+    DEF_BRANCH="$(git ls-remote --symref "${COMFY_REPO}" HEAD | awk '/^ref:/ {print $2}' | sed 's|refs/heads/||')"; \
+    echo "Auto-detected default branch: ${DEF_BRANCH}"; \
+    REF_TO_USE="${DEF_BRANCH}"; \
+  else \
+    REF_TO_USE="${COMFY_REF}"; \
+  fi; \
+  echo "Using ref: ${REF_TO_USE}"; \
+  (git ls-remote --heads --tags "${COMFY_REPO}" "${REF_TO_USE}" || true); \
+  for i in 1 2 3; do \
+    if [ "${REF_TO_USE#refs/}" != "${REF_TO_USE}" ] || [ ${#REF_TO_USE} -eq 40 ]; then \
+      git clone --depth=1 "${COMFY_REPO}" /opt/ComfyUI && \
+      git -C /opt/ComfyUI checkout -q "${REF_TO_USE}" && break; \
+    else \
+      git clone --depth=1 --branch "${REF_TO_USE}" "${COMFY_REPO}" /opt/ComfyUI && break; \
+    fi; \
+    echo "clone failed (attempt $i), retrying in 10s..."; sleep 10; rm -rf /opt/ComfyUI || true; \
+  done; \
+  if [ ! -d /opt/ComfyUI ]; then \
+    echo "Falling back to tarball download…"; \
+    mkdir -p /opt/ComfyUI && cd /opt/ComfyUI; \
+    case "${REF_TO_USE}" in \
+      ????????????????????????????????????????) REF_DL="master" ;; \
+      *) REF_DL="${REF_TO_USE}" ;; \
+    esac; \
+    curl -fL "https://codeload.github.com/comfyanonymous/ComfyUI/tar.gz/${REF_DL}" | tar -xz --strip-components=1; \
+  fi; \
+  test -f /opt/ComfyUI/main.py
+
+# Pre-install ComfyUI-Manager
+RUN git clone --depth=1 https://github.com/Comfy-Org/ComfyUI-Manager /opt/ComfyUI/custom_nodes/ComfyUI-Manager && \
+    if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt ]; then \
+      /venv/bin/pip install -r /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt; \
+    fi
+
+# Deps for Kijai/WanWrapper + VHS and friends
+RUN /venv/bin/pip install --no-cache-dir -U \
+    diffusers>=0.34.0 accelerate>=1.2.1 transformers>=4.41 \
+    safetensors sentencepiece huggingface-hub einops timm peft \
+    ftfy protobuf pyloudnorm gguf>=0.14.0 opencv-python imageio-ffmpeg \
+    aiohttp uv
+
+# Create dirs
+RUN mkdir -p /workspace /manifests /scripts /opt/ComfyUI/user/default/workflows \
+    /usr/local/bin /workspace/models
+
+# Copy scripts & manifests
+COPY scripts/ /scripts/
+COPY bin/start-comfyui /usr/local/bin/start-comfyui
+COPY manifests/ /manifests/
+RUN chmod +x /usr/local/bin/start-comfyui /scripts/*.sh
+
+# Default ENV
+ENV ENABLE_JUPYTER=true \
+    JUPYTER_PORT=8888 \
+    JUPYTER_DIR=/workspace \
+    JUPYTER_TOKEN= \
+    COMFY_AUTOSTART=true \
+    COMFY_PORT=8188 \
+    COMFY_ARGS="--listen 0.0.0.0 --port 8188 --use-sage-attention" \
+    DATA_DIR=/workspace \
+    COMFY_DIR=/opt/ComfyUI \
+    MODELS_DIR=/workspace/models \
+    COMFY_WORKFLOWS_SRC=/workspace/workflows \
+    COMFY_WORKFLOWS_MODE=symlink \
+    CUSTOM_NODES_MANIFEST=/manifests/nodes_manifest.txt \
+    MODELS_MANIFEST=/manifests/models_manifest.txt \
+    WORKFLOWS_MANIFEST=/manifests/workflows_manifest.txt \
+    NODES_INSTALL_MODE=sync \
+    HF_TOKEN= \
+    COMFY_UPDATE_AT_START=false \
+    COMFY_REF_RUNTIME=
+
+WORKDIR /opt/ComfyUI
+ENTRYPOINT ["/usr/bin/tini", "--", "/scripts/entrypoint.sh"]

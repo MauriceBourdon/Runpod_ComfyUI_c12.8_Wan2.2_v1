@@ -1,61 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export COMFY_DIR=${COMFY_DIR:-/opt/ComfyUI}
-export DATA_DIR=${DATA_DIR:-/workspace}
-export MODELS_DIR=${MODELS_DIR:-/workspace/models}
-export COMFY_PORT=${COMFY_PORT:-8188}
-export ENABLE_JUPYTER=${ENABLE_JUPYTER:-true}
-export JUPYTER_PORT=${JUPYTER_PORT:-8888}
-export JUPYTER_DIR=${JUPYTER_DIR:-/workspace}
-export JUPYTER_TOKEN=${JUPYTER_TOKEN:-}
-export COMFY_AUTOSTART=${COMFY_AUTOSTART:-true}
-export COMFY_ARGS=${COMFY_ARGS:-"--listen 0.0.0.0 --port ${COMFY_PORT}"}
-export COMFY_WORKFLOWS_SRC=${COMFY_WORKFLOWS_SRC:-/workspace/workflows}
-export COMFY_WORKFLOWS_MODE=${COMFY_WORKFLOWS_MODE:-symlink}
-echo "==> ENV Summary"; env | sort || true
-echo "==> GPU Info"; nvidia-smi || true
-mkdir -p "${MODELS_DIR}" "${COMFY_DIR}/user/default/workflows" "${COMFY_WORKFLOWS_SRC}"
-cat > "${COMFY_DIR}/extra_model_paths.yaml" <<'YAML'
-models:
-  diffusion_models: /workspace/models/diffusion_models
-  vae: /workspace/models/vae
-  loras: /workspace/models/loras
-  clip: /workspace/models/clip
-  controlnet: /workspace/models/controlnet
-YAML
-/scripts/install_nodes.sh || echo "[WARN] install_nodes failed"
-/scripts/download_models_async.sh || echo "[WARN] async download launcher failed"
-case "${COMFY_WORKFLOWS_MODE}" in
-  symlink)
-    echo "[workflows] symlink mode from ${COMFY_WORKFLOWS_SRC}"
-    rm -rf "${COMFY_DIR}/user/default/workflows"
-    ln -s "${COMFY_WORKFLOWS_SRC}" "${COMFY_DIR}/user/default/workflows"
-    ;;
-  sync)
-    echo "[workflows] sync mode (no overwrite) from ${COMFY_WORKFLOWS_SRC}"
-    rsync -a --ignore-existing "${COMFY_WORKFLOWS_SRC}/" "${COMFY_DIR}/user/default/workflows/"
-    ;;
-  sync-force)
-    echo "[workflows] sync-force mode (overwrite) from ${COMFY_WORKFLOWS_SRC}"
-    rsync -a --delete "${COMFY_WORKFLOWS_SRC}/" "${COMFY_DIR}/user/default/workflows/"
-    ;;
-  *)
-    echo "[workflows] unknown mode '${COMFY_WORKFLOWS_MODE}', defaulting to 'symlink'"
-    rm -rf "${COMFY_DIR}/user/default/workflows"
-    ln -s "${COMFY_WORKFLOWS_SRC}" "${COMFY_DIR}/user/default/workflows"
-    ;;
-esac
-ln -sf "${COMFY_DIR}" "${DATA_DIR}/ComfyUI"
-if [ "${ENABLE_JUPYTER}" = "true" ]; then
-  echo "==> Starting JupyterLab on 0.0.0.0:${JUPYTER_PORT} (dir: ${JUPYTER_DIR})"
-  /venv/bin/jupyter lab --ServerApp.ip=0.0.0.0 --ServerApp.port="${JUPYTER_PORT}" --ServerApp.open_browser=False --ServerApp.token="${JUPYTER_TOKEN}" --ServerApp.password='' --ServerApp.allow_origin='*' --ServerApp.root_dir="${JUPYTER_DIR}" --ServerApp.allow_root=True > "${DATA_DIR}/jupyter.log" 2>&1 &
+
+log() { echo "[$(date -u +'%F %T')] $*"; }
+
+# Optionally update ComfyUI to a runtime ref (branch/tag/SHA)
+if [[ -n "${COMFY_UPDATE_AT_START:-}" && "${COMFY_UPDATE_AT_START}" == "true" && -n "${COMFY_REF_RUNTIME:-}" ]]; then
+  log "Updating ComfyUI to ${COMFY_REF_RUNTIME} ..."
+  git -C "${COMFY_DIR:-/opt/ComfyUI}" fetch --all --tags || true
+  git -C "${COMFY_DIR:-/opt/ComfyUI}" reset --hard "${COMFY_REF_RUNTIME}" || true
 fi
-cd "${COMFY_DIR}"
-if [ "${COMFY_AUTOSTART}" = "true" ]; then
-  echo "==> Starting ComfyUI with: ${COMFY_ARGS}"
-  exec /venv/bin/python main.py ${COMFY_ARGS}
+
+# Map extra models path
+EXTRA_CFG="${COMFY_DIR:-/opt/ComfyUI}/extra_model_paths.yaml"
+cat > "${EXTRA_CFG}" <<YAML
+models_dir: ${MODELS_DIR:-/workspace/models}
+YAML
+
+# Start Jupyter (background) if requested
+if [[ "${ENABLE_JUPYTER:-true}" == "true" ]]; then
+  log "Launching JupyterLab on ${JUPYTER_PORT:-8888} ..."
+  nohup /venv/bin/jupyter lab     --ServerApp.ip=0.0.0.0     --ServerApp.port="${JUPYTER_PORT:-8888}"     --ServerApp.open_browser=False     --ServerApp.token="${JUPYTER_TOKEN:-}"     --ServerApp.password=''     --ServerApp.allow_origin='*'     --ServerApp.root_dir="${JUPYTER_DIR:-/workspace}"     --ServerApp.allow_root=True     > "${JUPYTER_DIR:-/workspace}"/jupyter.log 2>&1 &
+fi
+
+# Install custom nodes
+if [[ -f "${CUSTOM_NODES_MANIFEST:-}" ]]; then
+  if [[ "${NODES_INSTALL_MODE:-sync}" == "sync" ]]; then
+    log "Installing custom nodes (sync) from ${CUSTOM_NODES_MANIFEST} ..."
+    /scripts/install_nodes.sh "${CUSTOM_NODES_MANIFEST}"
+  else
+    log "Installing custom nodes (async) from ${CUSTOM_NODES_MANIFEST} ..."
+    nohup /scripts/install_nodes.sh "${CUSTOM_NODES_MANIFEST}" >/workspace/nodes_install.log 2>&1 &
+  fi
+fi
+
+# Manage workflows (copy/symlink + from manifest)
+/scripts/manage_workflows.sh
+
+# Download models (async by default to not block too long)
+if [[ -f "${MODELS_MANIFEST:-}" ]]; then
+  log "Downloading models from ${MODELS_MANIFEST} (async) ..."
+  nohup /venv/bin/python /scripts/download_models.py "${MODELS_MANIFEST}" "${MODELS_DIR:-/workspace/models}" "${HF_TOKEN:-}" >/workspace/models_download.log 2>&1 &
+fi
+
+# Finally, launch ComfyUI if requested
+if [[ "${COMFY_AUTOSTART:-true}" == "true" ]]; then
+  log "Starting ComfyUI ..."
+  exec /usr/local/bin/start-comfyui
 else
-  echo "==> COMFY_AUTOSTART=false : not starting ComfyUI automatically."
-  echo "    Launch manually via: start-comfyui <args>"
-  tail -f /workspace/jupyter.log
+  log "COMFY_AUTOSTART=false; container is up, not launching ComfyUI."
+  tail -f /dev/null
 fi
