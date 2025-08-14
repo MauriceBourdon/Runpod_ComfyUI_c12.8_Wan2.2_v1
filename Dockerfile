@@ -1,4 +1,4 @@
-# Runpod ComfyUI Wan2.2 + Jupyter — V4.1.4c (AUTO-REF + deps fixed)
+# Runpod ComfyUI Wan2.2 + Jupyter — V4.1.4c (AUTO-REF, deps simplifiées)
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -9,15 +9,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Outils de base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-pip git git-lfs curl ca-certificates ffmpeg \
-    tini aria2 jq rsync net-tools iproute2 wget unzip && \
-    git lfs install && \
-    rm -rf /var/lib/apt/lists/*
+    tini aria2 jq rsync net-tools iproute2 wget unzip \
+    # pour opencv & builds légers
+    build-essential python3-dev pkg-config cmake libgl1 libglib2.0-0 \
+ && git lfs install \
+ && rm -rf /var/lib/apt/lists/*
 
 # venv Python
-RUN python3 -m venv /venv && /venv/bin/pip install --upgrade pip setuptools wheel
+RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -U pip setuptools wheel
 
 # JupyterLab minimal
-RUN /venv/bin/pip install jupyterlab==4.2.5 jupyterlab-lsp==5.1.0 jupyter-lsp==2.2.5
+RUN /venv/bin/pip install --no-cache-dir jupyterlab==4.2.5 jupyterlab-lsp==5.1.0 jupyter-lsp==2.2.5
 
 # --- ComfyUI (auto-detect default branch + robust fetch) ---
 ARG COMFY_REPO=https://github.com/comfyanonymous/ComfyUI.git
@@ -56,45 +58,43 @@ RUN set -eux; \
   test -f /opt/ComfyUI/main.py
 
 # ComfyUI-Manager (pré-install)
-RUN git clone --depth=1 https://github.com/Comfy-Org/ComfyUI-Manager /opt/ComfyUI/custom_nodes/ComfyUI-Manager && \
-    if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt ]; then \
-      /venv/bin/pip install -r /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt; \
+RUN git clone --depth=1 https://github.com/Comfy-Org/ComfyUI-Manager /opt/ComfyUI/custom_nodes/ComfyUI-Manager \
+ && if [ -f /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt ]; then \
+      /venv/bin/pip install --no-cache-dir -r /opt/ComfyUI/custom_nodes/ComfyUI-Manager/requirements.txt; \
     fi
 
-# Deps OS pour wheels (OpenCV) + build minimal
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential python3-dev pkg-config cmake \
-    libgl1 libglib2.0-0 && \
-    rm -rf /var/lib/apt/lists/*
+# ---------------------- DEPS PYTHON SIMPLIFIÉES ----------------------
 
 # Outils pip à jour
 RUN /venv/bin/pip install --no-cache-dir -U pip setuptools wheel
 
-# (Optionnel) PyTorch cu128 (décommenter si tu veux pinner Torch ici)
-# RUN /venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 \
-#     torch torchvision torchaudio
+# 0) PyTorch CUDA 12.8 AVANT le reste (wheels GPU officiels)
+RUN /venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 \
+    torch torchvision torchaudio
 
-# 1) protobuf compatible HF d'abord
+# 1) Protobuf compatible HF
 RUN /venv/bin/pip install --no-cache-dir "protobuf<5,>=3.20.3"
 
-# 2) lot principal (pins stables)
+# 2) HF core / utilitaires
 RUN /venv/bin/pip install --no-cache-dir \
-    diffusers==0.34.0 accelerate==1.10.0 transformers==4.44.2 \
-    huggingface-hub==0.24.6 safetensors==0.4.5 \
-    einops==0.8.0 timm==1.0.9 peft==0.17.0 \
-    ftfy==6.3.1 pyloudnorm==0.1.1 sentencepiece==0.2.0
+    huggingface-hub==0.24.6 safetensors==0.4.5 ftfy==6.3.1 pyloudnorm==0.1.1
 
-# 3) vidéo / IO / réseau
+# 3) Diffusers / Accelerate / Transformers
 RUN /venv/bin/pip install --no-cache-dir \
-    opencv-python==4.10.0.84 imageio-ffmpeg==0.4.9 \
-    aiohttp==3.9.5 \
-    gguf==0.17.1
+    diffusers==0.34.0 accelerate==1.10.0 transformers==4.44.2
 
-# Répertoires
-RUN mkdir -p /workspace /manifests /scripts /opt/ComfyUI/user/default/workflows \
-    /usr/local/bin /workspace/models
+# 4) timm / peft / einops
+RUN /venv/bin/pip install --no-cache-dir \
+    timm==1.0.9 peft==0.17.0 einops==0.8.0
 
-# Scripts & manifests (présents dans ton repo)
+# 5) sentencepiece + vidéo / IO / réseau
+RUN /venv/bin/pip install --no-cache-dir \
+    sentencepiece==0.2.0 opencv-python==4.10.0.84 imageio-ffmpeg==0.4.9 aiohttp==3.9.5 gguf==0.17.1
+
+# --------------------------------------------------------------------
+
+# Répertoires + scripts & manifests (doivent exister dans ton repo)
+RUN mkdir -p /workspace /manifests /scripts /opt/ComfyUI/user/default/workflows /usr/local/bin /workspace/models
 COPY scripts/ /scripts/
 COPY bin/start-comfyui /usr/local/bin/start-comfyui
 COPY manifests/ /manifests/
