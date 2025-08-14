@@ -14,7 +14,7 @@ if [[ -n "${WORKFLOWS_MANIFEST:-}" && -f "${WORKFLOWS_MANIFEST}" ]]; then
     fname=$(basename "$url")
     echo "[workflows] fetch $fname"
     curl -fsSL "$url" -o "${src}/${fname}" || true
-  done < "${WORKFLOWS_MANIFEST}"
+  done
 fi
 
 if [[ "${mode}" == "symlink" ]]; then
