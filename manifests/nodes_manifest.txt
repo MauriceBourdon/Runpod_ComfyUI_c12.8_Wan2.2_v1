@@ -1,0 +1,8 @@
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
+https://github.com/kijai/ComfyUI-KJNodes
+https://github.com/kijai/ComfyUI-WanVideoWrapper
+https://github.com/ltdrdata/ComfyUI-Impact-Pack
+https://github.com/rgthree/rgthree-comfy
+https://github.com/mixlab-ai/mixlab-nodes-comfyui
+https://github.com/ltdrdata/ComfyUI-Inspire-Pack
+https://github.com/filonb7/ComfyUI-Fill-Nodes
