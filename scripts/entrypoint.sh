@@ -1,25 +1,143 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "🚀 Entrypoint started..."
+log() { echo "[$(date -u +'%F %T')] $*"; }
 
-ENABLE_JUPYTER=${ENABLE_JUPYTER:-true}
-JUPYTER_PORT=${JUPYTER_PORT:-8888}
-COMFY_AUTOSTART=${COMFY_AUTOSTART:-true}
-COMFY_ARGS=${COMFY_ARGS:---listen 0.0.0.0 --port 8188}
-
-python3 /scripts/install_nodes.py /manifests/nodes_manifest.txt
-python3 /scripts/install_models.py /manifests/models_manifest.txt
-python3 /scripts/install_jupyter_exts.py /manifests/jupyter_manifest.txt
-
-if [ "$ENABLE_JUPYTER" = "true" ]; then
-    echo "📓 Lancement Jupyter..."
-    nohup jupyter lab --ip=0.0.0.0 --port=$JUPYTER_PORT --no-browser --NotebookApp.token="$JUPYTER_TOKEN" > /workspace/jupyter.log 2>&1 &
+# Secrets via fichiers si fournis (plus propre que ENV)
+if [[ -z "${JUPYTER_TOKEN:-}" && -n "${JUPYTER_TOKEN_FILE:-}" && -r "${JUPYTER_TOKEN_FILE}" ]]; then
+  export JUPYTER_TOKEN="$(cat "${JUPYTER_TOKEN_FILE}")"
+fi
+if [[ -z "${HF_TOKEN:-}" && -n "${HF_TOKEN_FILE:-}" && -r "${HF_TOKEN_FILE}" ]]; then
+  export HF_TOKEN="$(cat "${HF_TOKEN_FILE}")"
 fi
 
-if [ "$COMFY_AUTOSTART" = "true" ]; then
-    echo "🎨 Lancement ComfyUI..."
-    python3 /opt/ComfyUI/main.py $COMFY_ARGS > /workspace/comfyui.log 2>&1
+# Update ComfyUI au boot (optionnel)
+if [[ "${COMFY_UPDATE_AT_START:-false}" == "true" && -n "${COMFY_REF_RUNTIME:-}" ]]; then
+  log "Updating ComfyUI to ${COMFY_REF_RUNTIME} ..."
+  git -C "${COMFY_DIR:-/opt/ComfyUI}" fetch --all --tags || true
+  git -C "${COMFY_DIR:-/opt/ComfyUI}" reset --hard "${COMFY_REF_RUNTIME}" || true
+fi
+
+# extra_model_paths.yaml → MODELS_DIR
+EXTRA_CFG="${COMFY_DIR:-/opt/ComfyUI}/extra_model_paths.yaml"
+cat > "${EXTRA_CFG}" <<YAML
+models_dir: ${MODELS_DIR:-/workspace/models}
+YAML
+
+# Jupyter (background)
+if [[ "${ENABLE_JUPYTER:-true}" == "true" ]]; then
+  log "Launching JupyterLab on ${JUPYTER_PORT:-8888} ..."
+  nohup /venv/bin/jupyter lab \
+    --ServerApp.ip=0.0.0.0 \
+    --ServerApp.port="${JUPYTER_PORT:-8888}" \
+    --ServerApp.open_browser=False \
+    --ServerApp.token="${JUPYTER_TOKEN:-}" \
+    --ServerApp.password='' \
+    --ServerApp.allow_origin='*' \
+    --ServerApp.root_dir="${JUPYTER_DIR:-/workspace}" \
+    --ServerApp.allow_root=True \
+    > "${JUPYTER_DIR:-/workspace}"/jupyter.log 2>&1 &
+fi
+
+# Torch au runtime (CUDA d'abord, CPU fallback)
+if ! /venv/bin/python -c "import torch" >/dev/null 2>&1; then
+  log "[torch] not found → installing CUDA wheels..."
+  if ! /venv/bin/pip install --no-cache-dir \
+        --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}" \
+        "${TORCH_SPEC_TORCH:-torch}" "${TORCH_SPEC_VISION:-torchvision}" "${TORCH_SPEC_AUDIO:-torchaudio}"; then
+    log "[torch] CUDA wheels unavailable → CPU fallback"
+    /venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+      torch torchvision torchaudio
+  fi
 else
-    tail -f /dev/null
+  log "[torch] already installed."
+fi
+
+# Protobuf < 5 (compat HF), puis stack HF (après torch)
+ /venv/bin/pip show protobuf >/dev/null 2>&1 || /venv/bin/pip install --no-cache-dir "protobuf<5,>=3.20.3"
+ /venv/bin/pip install --no-cache-dir \
+  huggingface-hub==0.24.6 safetensors==0.4.5 ftfy==6.3.1 pyloudnorm==0.1.1 \
+  diffusers==0.34.0 accelerate==1.10.0 transformers==4.44.2 \
+  timm==1.0.9 peft==0.17.0 einops==0.8.0 \
+  sentencepiece==0.2.0 opencv-python==4.10.0.84 imageio-ffmpeg==0.4.9 aiohttp==3.9.5 gguf==0.17.1 || true
+
+# Install nodes (manifest)
+install_nodes() {
+  local manifest="${1:-}"; local custom_dir="${COMFY_DIR:-/opt/ComfyUI}/custom_nodes"
+  [[ -f "$manifest" ]] || { log "no nodes manifest"; return 0; }
+  mkdir -p "$custom_dir"
+  while IFS= read -r repo; do
+    [[ -z "$repo" || "$repo" =~ ^# ]] && continue
+    name="$(basename "$repo")"; dest="${custom_dir}/${name}"
+    if [[ -d "$dest/.git" ]]; then
+      log "[nodes] update $name"; git -C "$dest" pull --ff-only || true
+    else
+      log "[nodes] clone $name"; git clone --depth=1 "$repo" "$dest" || true
+    fi
+    if [[ -f "$dest/requirements.txt" ]]; then
+      /venv/bin/pip install -r "$dest/requirements.txt" || true
+    fi
+  done < "$manifest"
+}
+
+if [[ -f "${CUSTOM_NODES_MANIFEST:-}" ]]; then
+  if [[ "${NODES_INSTALL_MODE:-sync}" == "sync" ]]; then
+    install_nodes "${CUSTOM_NODES_MANIFEST}"
+  else
+    nohup bash -c "install_nodes \"${CUSTOM_NODES_MANIFEST}\"" >/workspace/nodes_install.log 2>&1 &
+  fi
+fi
+
+# Workflows (download ensuite link/copy)
+manage_workflows() {
+  local src="${COMFY_WORKFLOWS_SRC:-/workspace/workflows}"
+  local dst="${COMFY_DIR:-/opt/ComfyUI}/user/default/workflows"
+  local mode="${COMFY_WORKFLOWS_MODE:-symlink}"
+  mkdir -p "$src" "$dst"
+  if [[ -n "${WORKFLOWS_MANIFEST:-}" && -f "${WORKFLOWS_MANIFEST}" ]]; then
+    while IFS= read -r url; do
+      [[ -z "$url" || "$url" =~ ^# ]] && continue
+      fname="$(basename "$url")"
+      curl -fsSL "$url" -o "${src}/${fname}" || true
+    done < "${WORKFLOWS_MANIFEST}"
+  fi
+  if [[ "${mode}" == "symlink" ]]; then
+    for f in "${src}"/*.json; do [[ -e "$f" ]] || continue; ln -sf "$f" "${dst}/$(basename "$f")"; done
+  else
+    rsync -a --delete "${src}/" "${dst}/"
+  fi
+}
+manage_workflows
+
+# Modèles (HF) en tâche de fond
+if [[ -f "${MODELS_MANIFEST:-}" ]]; then
+  nohup /venv/bin/python - <<'PY' "${MODELS_MANIFEST}" "${MODELS_DIR:-/workspace/models}" "${HF_TOKEN:-}" >/workspace/models_download.log 2>&1 &
+import sys, os
+from huggingface_hub import hf_hub_download
+manifest, dest_root, token = sys.argv[1], sys.argv[2], (sys.argv[3] or None)
+os.makedirs(dest_root, exist_ok=True)
+for line in open(manifest, "r", encoding="utf-8"):
+    line=line.strip()
+    if not line or line.startswith("#"): continue
+    try:
+        repo, path, sub = line.split("|", 3)
+    except ValueError:
+        print("[models] skip invalid line:", line); continue
+    dstdir = os.path.join(dest_root, sub); os.makedirs(dstdir, exist_ok=True)
+    try:
+        fp = hf_hub_download(repo_id=repo, filename=path, token=token,
+                             local_dir=dstdir, local_dir_use_symlinks=False)
+        print("[models] ok:", repo, path, "->", fp)
+    except Exception as e:
+        print("[models] fail:", repo, path, "->", e)
+PY
+fi
+
+# Lancement ComfyUI
+if [[ "${COMFY_AUTOSTART:-true}" == "true" ]]; then
+  log "Starting ComfyUI ..."
+  exec /venv/bin/python "${COMFY_DIR:-/opt/ComfyUI}"/main.py ${COMFY_ARGS:-"--listen 0.0.0.0 --port 8188"}
+else
+  log "COMFY_AUTOSTART=false; container is up."
+  tail -f /dev/null
 fi
