@@ -3,7 +3,7 @@ set -euo pipefail
 
 log() { echo "[$(date -u +'%F %T')] $*"; }
 
-# Optionally update ComfyUI to a runtime ref (branch/tag/SHA)
+# Optional runtime update of ComfyUI
 if [[ -n "${COMFY_UPDATE_AT_START:-}" && "${COMFY_UPDATE_AT_START}" == "true" && -n "${COMFY_REF_RUNTIME:-}" ]]; then
   log "Updating ComfyUI to ${COMFY_REF_RUNTIME} ..."
   git -C "${COMFY_DIR:-/opt/ComfyUI}" fetch --all --tags || true
@@ -19,10 +19,34 @@ YAML
 # Start Jupyter (background) if requested
 if [[ "${ENABLE_JUPYTER:-true}" == "true" ]]; then
   log "Launching JupyterLab on ${JUPYTER_PORT:-8888} ..."
-  nohup /venv/bin/jupyter lab     --ServerApp.ip=0.0.0.0     --ServerApp.port="${JUPYTER_PORT:-8888}"     --ServerApp.open_browser=False     --ServerApp.token="${JUPYTER_TOKEN:-}"     --ServerApp.password=''     --ServerApp.allow_origin='*'     --ServerApp.root_dir="${JUPYTER_DIR:-/workspace}"     --ServerApp.allow_root=True     > "${JUPYTER_DIR:-/workspace}"/jupyter.log 2>&1 &
+  nohup /venv/bin/jupyter lab \
+    --ServerApp.ip=0.0.0.0 \
+    --ServerApp.port="${JUPYTER_PORT:-8888}" \
+    --ServerApp.open_browser=False \
+    --ServerApp.token="${JUPYTER_TOKEN:-}" \
+    --ServerApp.password='' \
+    --ServerApp.allow_origin='*' \
+    --ServerApp.root_dir="${JUPYTER_DIR:-/workspace}" \
+    --ServerApp.allow_root=True \
+    > "${JUPYTER_DIR:-/workspace}"/jupyter.log 2>&1 &
 fi
 
-# Install custom nodes
+# --- Torch auto-install at runtime if missing ---
+if ! /venv/bin/python -c "import torch" >/dev/null 2>&1; then
+  log "[torch] not found → installing at runtime..."
+  # Try CUDA wheels first from TORCH_INDEX_URL; else fallback to CPU wheels
+  if ! /venv/bin/pip install --no-cache-dir \
+        --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}" \
+        "${TORCH_SPEC_TORCH:-torch}" "${TORCH_SPEC_VISION:-torchvision}" "${TORCH_SPEC_AUDIO:-torchaudio}"; then
+    log "[torch] CUDA wheels unavailable → falling back to CPU wheels"
+    /venv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+      torch torchvision torchaudio
+  fi
+else
+  log "[torch] already installed."
+fi
+
+# Install custom nodes from manifest
 if [[ -f "${CUSTOM_NODES_MANIFEST:-}" ]]; then
   if [[ "${NODES_INSTALL_MODE:-sync}" == "sync" ]]; then
     log "Installing custom nodes (sync) from ${CUSTOM_NODES_MANIFEST} ..."
@@ -33,16 +57,16 @@ if [[ -f "${CUSTOM_NODES_MANIFEST:-}" ]]; then
   fi
 fi
 
-# Manage workflows (copy/symlink + from manifest)
+# Manage workflows (copy/symlink + optional download from manifest)
 /scripts/manage_workflows.sh
 
-# Download models (async by default to not block too long)
+# Download models (async)
 if [[ -f "${MODELS_MANIFEST:-}" ]]; then
   log "Downloading models from ${MODELS_MANIFEST} (async) ..."
   nohup /venv/bin/python /scripts/download_models.py "${MODELS_MANIFEST}" "${MODELS_DIR:-/workspace/models}" "${HF_TOKEN:-}" >/workspace/models_download.log 2>&1 &
 fi
 
-# Finally, launch ComfyUI if requested
+# Launch ComfyUI if requested
 if [[ "${COMFY_AUTOSTART:-true}" == "true" ]]; then
   log "Starting ComfyUI ..."
   exec /usr/local/bin/start-comfyui
